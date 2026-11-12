@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import zipfile
 from pathlib import Path
 
@@ -19,7 +20,9 @@ import pytest
 RAIZ = Path(__file__).resolve().parent.parent
 WINDOWS = sys.platform == "win32"
 BIN = RAIZ / "windows" / "bin" if WINDOWS else RAIZ / "bin"
-PRELO = Path(sys.executable).parent / ("prelo.exe" if WINDOWS else "prelo")
+# a pasta dos comandos instalados pelo pip: num venv, a do python.exe; num Python
+# instalado no Windows (como na CI), a Scripts\ ao lado dele
+PRELO = Path(sysconfig.get_path("scripts")) / ("prelo.exe" if WINDOWS else "prelo")
 
 
 def rodar(cmd: str, *args, tmp: Path, **env) -> subprocess.CompletedProcess:

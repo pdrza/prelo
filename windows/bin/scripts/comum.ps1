@@ -78,7 +78,14 @@ function e_livro([string]$p) {
 
 function formato_valido([string]$f) { (" $PreloFormatos ").Contains(" $f ") }
 
-function hash_arquivo([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() }
+# SHA-256 pelo .NET, como o sha256sum do Linux. O Get-FileHash vem de um módulo, e o Windows
+# PowerShell aberto de dentro do PowerShell 7 herda a lista de módulos do 7 e não o encontra.
+function hash_arquivo([string]$p) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $f = [IO.File]::OpenRead((caminho_absoluto $p))
+    try { -join ($sha.ComputeHash($f) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $f.Dispose(); $sha.Dispose() }
+}
 
 function erro_de_io($registro) { $registro.Exception.GetBaseException() -is [IO.IOException] }
 
