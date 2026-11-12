@@ -1,0 +1,182 @@
+name: testes
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Sintaxe dos scripts bash
+        run: for f in install.sh uninstall.sh bin/* lib/*.sh; do bash -n "$f"; done
+      - name: shellcheck
+        run: shellcheck install.sh uninstall.sh bin/* lib/*.sh
+      - run: python -m pytest -q
+
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[desktop,dev]"
+      - name: Sintaxe dos scripts PowerShell (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $falhas = 0
+          foreach ($f in Get-ChildItem windows -Recurse -Filter *.ps1) {
+            $tokens = $null; $erros = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$tokens, [ref]$erros)
+            foreach ($e in $erros) { Write-Host "$($f.Name):$($e.Extent.StartLineNumber): $($e.Message)"; $falhas++ }
+          }
+          exit $falhas
+      - run: python -m pytest -q
+
+  # App sem Python (PyInstaller), versão portátil e instalador (Inno Setup).
+  windows-instalador:
+    needs: windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Inno Setup 6.3 ou mais novo
+        shell: powershell
+        run: choco upgrade innosetup -y --no-progress  # instala, ou atualiza o que vier na imagem
+      - name: Gerar o app, o portátil e o instalador
+        shell: powershell
+        run: .\windows\build.ps1 -Python (Get-Command python).Source -Testar -SemJanela
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prelo-windows
+          path: |
+            dist/Prelo-*-windows-x64.zip
+            dist/Prelo-*-windows-x64-setup.exe
+          if-no-files-found: error
+
+  # Pacote do Linux: o código com o install.sh. A CI instala o pacote como um usuário
+  # faria (Python e GTK do sistema), apaga a pasta extraída e confere o que ficou.
+  linux-pacote:
+    needs: linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gerar o pacote
+        run: |
+          versao="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/prelo/__init__.py)"
+          test -n "$versao"
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="Prelo-$versao/" -o "dist/Prelo-$versao-linux.tar.gz" HEAD \
+            install.sh uninstall.sh bin lib src pyproject.toml README.md LICENSE docs
+          echo "PACOTE=$PWD/dist/Prelo-$versao-linux.tar.gz" >> "$GITHUB_ENV"
+          echo "PASTA=Prelo-$versao" >> "$GITHUB_ENV"
+      - name: Pacotes do sistema (venv, GTK e WebKitGTK)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-venv python3-gi gir1.2-webkit2-4.1 xvfb
+      - name: Instalar a partir do pacote
+        run: |
+          cd "$RUNNER_TEMP"
+          tar xzf "$PACOTE"
+          cd "$PASTA"
+          ./install.sh
+          cd ..
+          rm -rf "$PASTA"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Linha de comando, conversão e utilitários
+        run: |
+          prelo --version
+          ~/.local/share/prelo/venv/bin/python -c 'import gi; gi.require_version("WebKit2", "4.1")'
+          test -f ~/.local/share/applications/prelo.desktop
+          mkdir -p "$RUNNER_TEMP/livros"
+          ~/.local/share/prelo/venv/bin/python - "$RUNNER_TEMP/livros/teste.pdf" <<'EOF'
+          import sys
+          import pymupdf
+          doc = pymupdf.open()
+          for i in range(3):
+              doc.new_page().insert_text((72, 72), f"Página {i + 1} do livro de teste", fontsize=18)
+          doc.set_metadata({"title": "Livro de Teste"})
+          doc.save(sys.argv[1])
+          EOF
+          saida="$(prelo convert "$RUNNER_TEMP/livros/teste.pdf" -f azw3 --mode fixed -o "$RUNNER_TEMP/saida" --print-path)"
+          test -s "$saida"
+          prelo-lote -f epub -o "$RUNNER_TEMP/lote" "$RUNNER_TEMP/livros"
+          ls "$RUNNER_TEMP/lote"/*.epub
+      # Informativo: a janela numa tela virtual depende do WebKitGTK do runner.
+      - name: Janela (prelo-app --diagnostico)
+        continue-on-error: true
+        timeout-minutes: 4
+        run: |
+          if ! timeout 150 xvfb-run -a prelo-app --diagnostico | tee "$RUNNER_TEMP/diagnostico.json" \
+             || ! grep -q '"resultado": "ok"' "$RUNNER_TEMP/diagnostico.json"; then
+            tail -n 40 ~/.local/share/prelo/prelo.log || true
+            exit 1
+          fi
+      - name: Desinstalar
+        run: |
+          ~/.local/share/prelo/uninstall.sh
+          for f in ~/.local/bin/prelo ~/.local/bin/prelo-app ~/.local/bin/prelo-lote \
+                   ~/.local/share/prelo/venv ~/.local/share/prelo/uninstall.sh \
+                   ~/.local/share/applications/prelo.desktop; do
+            if [ -e "$f" ] || [ -L "$f" ]; then echo "sobrou $f"; exit 1; fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prelo-linux
+          path: dist/Prelo-*-linux.tar.gz
+          if-no-files-found: error
+
+  # Numa tag (git tag v0.3.0 && git push origin v0.3.0), com todos os testes passando nos
+  # dois sistemas, os três downloads vão juntos para uma Release do GitHub: instalador e
+  # portátil do Windows e pacote do Linux. Se algo falhar, nada é publicado.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, windows-instalador, linux-pacote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: prelo-*
+          path: dist
+          merge-multiple: true
+      - name: Publicar a Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          versao="${TAG#v}"
+          arquivos=(
+            "dist/Prelo-$versao-windows-x64-setup.exe"
+            "dist/Prelo-$versao-windows-x64.zip"
+            "dist/Prelo-$versao-linux.tar.gz"
+          )
+          for f in "${arquivos[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Falta $f. A tag $TAG bate com a versão do Prelo (src/prelo/__init__.py)?"; ls dist; exit 1
+            fi
+          done
+          gh release create "$TAG" "${arquivos[@]}" --repo "$GITHUB_REPOSITORY" --title "Prelo $versao" --generate-notes

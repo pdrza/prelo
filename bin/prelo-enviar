@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# prelo-enviar: manda livros para o leitor ligado no USB (Kindle ou Kobo).
+#
+# Detecta o aparelho montado, escolhe o formato que ele lê (AZW3 no Kindle,
+# EPUB no Kobo), converte só o que precisa, copia para a pasta certa e, se
+# pedido, ejeta. É o modo "ao enviar para o dispositivo" do Calibre.
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib/comum.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/comum.sh"
+
+ajuda() {
+  cat <<'EOF'
+Uso: prelo-enviar [opções] ARQUIVO... [-- opções do prelo convert]
+
+Converte e copia livros para o Kindle ou Kobo conectado pelo USB.
+
+  -d, --dispositivo PASTA   ponto de montagem do leitor (padrão: detecta)
+  -p, --perfil ID           tela do aparelho (padrão: kindle-pw5 / kobo-libra)
+  -m, --modo MODO           auto, fixed (layout fiel) ou reflow (padrão: auto)
+      --converter-sempre    converte até o que o leitor já abre (EPUB no Kobo...)
+  -e, --ejetar              desmonta o leitor no fim, pronto para desconectar
+  -l, --listar              só lista os leitores conectados
+  -h, --ajuda               mostra esta ajuda
+
+Exemplos:
+  prelo-enviar livro.pdf
+  prelo-enviar -p kindle-scribe -m fixed -e revista.pdf manga.cbz
+EOF
+}
+
+# Pastas onde o sistema monta pendrives e leitores (PRELO_MONTAGENS substitui).
+montagens() {
+  if [[ -n "${PRELO_MONTAGENS:-}" ]]; then
+    local d
+    # shellcheck disable=SC2086  # lista de pastas separadas por espaço, de propósito
+    for d in $PRELO_MONTAGENS; do
+      find "$d" -mindepth 1 -maxdepth 1 -type d 2> /dev/null
+    done
+    return
+  fi
+  findmnt -rn -o TARGET 2> /dev/null | sed 's/\\x20/ /g' | grep -E "^(/media/|/run/media/|/mnt/)" || true
+}
+
+# Imprime "marca" de um ponto de montagem (kindle, kobo) ou nada.
+marca_de() {
+  if [[ -d "$1/documents" && -d "$1/system" ]]; then
+    echo kindle
+  elif [[ -d "$1/.kobo" ]]; then
+    echo kobo
+  fi
+}
+
+listar() {
+  local m marca achou=0
+  while IFS= read -r m; do
+    marca="$(marca_de "$m")"
+    [[ -n "$marca" ]] || continue
+    printf '%-8s %s  (%s livres)\n' "$marca" "$m" "$(df -Ph "$m" | awk 'NR==2 {print $4}')"
+    achou=1
+  done < <(montagens)
+  ((achou))
+}
+
+dispositivo='' perfil='' modo=auto sempre=0 ejetar=0
+arquivos=() extras=()
+while (($#)); do
+  case "$1" in
+    -d | --dispositivo) dispositivo="${2:?falta a pasta}"; shift ;;
+    -p | --perfil) perfil="${2:?falta o perfil}"; shift ;;
+    -m | --modo) modo="${2:?falta o modo}"; shift ;;
+    --converter-sempre) sempre=1 ;;
+    -e | --ejetar) ejetar=1 ;;
+    -l | --listar) listar || morrer "nenhum Kindle ou Kobo conectado"; exit 0 ;;
+    -h | --ajuda | --help) ajuda; exit 0 ;;
+    --) shift; extras=("$@"); break ;;
+    -*) morrer "opção desconhecida: $1 (veja --ajuda)" ;;
+    *) arquivos+=("$1") ;;
+  esac
+  shift
+done
+((${#arquivos[@]})) || { ajuda; exit 1; }
+[[ "$modo" =~ ^(auto|fixed|reflow)$ ]] || morrer "modo inválido: $modo"
+
+# ---------------------------------------------------------------- aparelho
+if [[ -z "$dispositivo" ]]; then
+  mapfile -t achados < <(while IFS= read -r m; do [[ -n "$(marca_de "$m")" ]] && echo "$m"; done < <(montagens))
+  ((${#achados[@]})) || morrer "nenhum Kindle ou Kobo conectado (ligue pelo USB ou use --dispositivo PASTA)"
+  ((${#achados[@]} == 1)) || morrer "mais de um leitor conectado: escolha com --dispositivo (${achados[*]})"
+  dispositivo="${achados[0]}"
+fi
+[[ -d "$dispositivo" ]] || morrer "pasta do leitor não existe: $dispositivo"
+marca="$(marca_de "$dispositivo")"
+case "$marca" in
+  kindle) formato=azw3 destino="$dispositivo/documents" aceitos="azw3 mobi" perfil="${perfil:-kindle-pw5}" ;;
+  kobo) formato=epub destino="$dispositivo" aceitos="epub kepub cbz" perfil="${perfil:-kobo-libra}" ;;
+  *) morrer "não reconheci o leitor em $dispositivo (esperava Kindle ou Kobo)" ;;
+esac
+titulo "Enviando para ${marca^} em $dispositivo"
+
+# ---------------------------------------------------------------- envio
+log="$(arquivo_de_log enviar)"
+temporaria="$(mktemp -d)"
+trap 'rm -rf "$temporaria"' EXIT
+enviados=0 falhas=0
+
+copiar() {  # arquivo
+  local nome alvo livre tamanho
+  nome="${1##*/}"
+  alvo="$destino/$nome"
+  if [[ ! -f "$1" ]]; then
+    erro "arquivo a enviar não encontrado: $1"
+    return 1
+  fi
+  if [[ -e "$alvo" ]] && cmp -s -- "$1" "$alvo"; then
+    info "já está no leitor: $nome"
+    return 0
+  fi
+  tamanho="$(du -k -- "$1" | cut -f1)"
+  livre="$(df -Pk "$dispositivo" | awk 'NR==2 {print $4}')"
+  if ((tamanho + 1024 > livre)); then
+    erro "sem espaço no leitor para $nome"
+    return 1
+  fi
+  if [[ -e "$alvo" ]]; then  # nunca sobrescreve: mesmo nome, conteúdo diferente
+    local base="${nome%.*}" ext="${nome##*.}" n=2
+    while [[ -e "$destino/$base ($n).$ext" ]]; do n=$((n + 1)); done
+    alvo="$destino/$base ($n).$ext"
+  fi
+  # "copiar" roda dentro de um if, onde o set -e não vale: cada falha é conferida aqui
+  if ! cp -- "$1" "$alvo.prelo-parcial" || ! mv -- "$alvo.prelo-parcial" "$alvo"; then
+    rm -f -- "$alvo.prelo-parcial"
+    erro "não foi possível copiar $nome para o leitor"
+    return 1
+  fi
+  ultimo_alvo="$alvo"
+  ok "${alvo##*/}"
+}
+
+# Registro do que já foi enviado, na raiz do leitor: pelo hash do original, para
+# reconhecer o livro mesmo convertido de novo (cada AZW3 gerado tem um id novo).
+REGISTRO="$dispositivo/.prelo-enviados.tsv"
+ja_enviado() {  # hash → 0 se o arquivo enviado antes ainda está no leitor
+  local nome
+  [[ -f "$REGISTRO" ]] || return 1
+  nome="$(awk -F'\t' -v h="$1" -v f="$formato" -v p="$perfil" '$1 == h && $2 == f && $3 == p {n = $4} END {print n}' "$REGISTRO")"
+  [[ -n "$nome" && -e "$destino/$nome" ]]
+}
+
+for f in "${arquivos[@]}"; do
+  if ! e_livro "$f"; then
+    erro "não é um livro aceito: $f"
+    falhas=$((falhas + 1))
+    continue
+  fi
+  ext="$(extensao "$f")"
+  hash="$(hash_arquivo "$f")"
+  if ja_enviado "$hash"; then
+    info "já está no leitor: ${f##*/}"
+    continue
+  fi
+  if ((!sempre)) && [[ " $aceitos " == *" $ext "* ]]; then
+    pronto="$f"  # o leitor já abre este formato
+  elif ! pronto="$(converter "$f" "$formato" "$temporaria" "$log" --profile "$perfil" --mode "$modo" "${extras[@]}")" \
+    || [[ ! -f "$pronto" ]]; then
+    erro "falhou ao converter ${f##*/} (detalhes em $log)"
+    falhas=$((falhas + 1))
+    continue
+  fi
+  ultimo_alvo=""
+  if copiar "$pronto"; then
+    enviados=$((enviados + 1))
+    # sem arquivo de trava: no leitor fica só o registro (um envio por vez)
+    [[ -n "$ultimo_alvo" ]] && printf '%s\t%s\t%s\t%s\t%s\n' "$hash" "$formato" "$perfil" \
+      "${ultimo_alvo##*/}" "$(date -Iseconds)" >> "$REGISTRO"
+  else
+    falhas=$((falhas + 1))
+  fi
+done
+
+sync
+echo >&2
+titulo "Resumo: $enviados enviado(s), $falhas com erro"
+if ((ejetar)); then
+  if command -v gio > /dev/null && gio mount -e "$dispositivo" 2> /dev/null; then
+    ok "leitor ejetado: pode desconectar"
+  elif command -v udisksctl > /dev/null && udisksctl unmount -b "$(findmnt -n -o SOURCE --target "$dispositivo")" > /dev/null 2>&1; then
+    ok "leitor desmontado: pode desconectar"
+  else
+    aviso "não consegui ejetar; use o gerenciador de arquivos"
+  fi
+fi
+notificar "Prelo: enviado para o ${marca^}" "$enviados livro(s), $falhas com erro"
+((falhas == 0))

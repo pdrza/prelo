@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prelo"
+version = "0.3.0"
+description = "Conversor universal de livros (PDF, EPUB, AZW3, MOBI, CBZ) que preserva o layout. App para Linux e Windows, API local e utilitários de linha de comando."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-or-later"
+authors = [{ name = "Pedro Zanella" }]
+keywords = ["ebook", "pdf", "epub", "azw3", "mobi", "kindle", "kobo", "converter", "calibre"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows :: Windows 10",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Environment :: X11 Applications :: GTK",
+  "Environment :: Win32 (MS Windows)",
+  "Topic :: Text Processing :: Markup",
+  "Natural Language :: Portuguese (Brazilian)",
+]
+dependencies = [
+  "pymupdf>=1.24,<2",  # 2.x puxa onnxruntime/numpy, que o Prelo não usa
+  "pillow>=10.3",
+  "lxml>=5.0",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# janela nativa: no Linux, GTK/WebKitGTK vem do sistema (python3-gi, gir1.2-webkit2-4.1);
+# no Windows, o WebView2 do Edge (o pywebview traz o pythonnet)
+desktop = ["pywebview>=5.0"]
+# alternativa sem pacotes do sistema: Qt WebEngine pelo pip (~200 MB)
+desktop-qt = ["pywebview[qt]>=5.0"]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+prelo = "prelo.cli:main"
+
+[project.gui-scripts]
+prelo-app = "prelo.app.desktop:main"
+
+[project.urls]
+"Código" = "https://github.com/pdrza/prelo"
+"Versões" = "https://github.com/pdrza/prelo/releases"
+"Problemas" = "https://github.com/pdrza/prelo/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+prelo = ["ui/*", "ui/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

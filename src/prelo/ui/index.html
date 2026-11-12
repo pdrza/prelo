@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prelo</title>
+<link rel="icon" href="img/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/app.css">
+<script type="importmap">{ "imports": { "three": "./vendor/three/three.module.min.js" } }</script>
+<script>
+  // aplica tema e movimento antes de pintar, para não piscar
+  try {
+    const t = localStorage.getItem('prelo.theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+    if (localStorage.getItem('prelo.reduceMotion') === '1') document.documentElement.dataset.reduceMotion = '';
+  } catch (e) { /* armazenamento indisponível: segue o padrão do sistema */ }
+</script>
+</head>
+<body>
+<div class="app" id="app">
+  <header class="taskbar">
+    <div class="tb-left">
+      <button class="brand" data-menu="prelo" aria-haspopup="menu"><span id="brand-mark"></span><span>Prelo</span></button>
+      <button class="tb-btn" data-menu="arquivo" aria-haspopup="menu">Arquivo</button>
+      <button class="tb-btn" data-menu="exibir" aria-haspopup="menu">Exibir</button>
+      <button class="tb-btn" data-menu="ajuda" aria-haspopup="menu">Ajuda</button>
+    </div>
+    <div class="tb-right">
+      <button class="tb-chip busy" id="tb-jobs" hidden><span class="dot"></span><span></span></button>
+      <span class="tb-chip" id="tb-api" title="API local"><span class="dot"></span><span>API</span></span>
+      <button class="tb-btn" id="tb-theme" title="Alternar tema"></button>
+      <span class="clock" id="tb-clock"></span>
+    </div>
+  </header>
+
+  <main class="desktop" id="desktop">
+    <nav class="desk-icons desk-icons--left" id="icons-left" aria-label="Funções"></nav>
+    <nav class="desk-icons desk-icons--right" id="icons-right" aria-label="Sistema"></nav>
+    <div class="selection-box" id="selbox" hidden></div>
+    <p class="desk-hint" id="desk-hint" hidden>Clique num ícone para abrir · arraste livros para cá</p>
+
+    <div class="window-list">
+      <section class="app-window" id="win" data-state="windowed" aria-labelledby="aw-title">
+        <div class="aw-controls">
+          <button data-act="expand" title="Expandir (Shift+↑)" aria-label="Expandir"></button>
+          <button data-act="close" title="Fechar (Shift+W)" aria-label="Fechar"></button>
+        </div>
+        <header class="aw-head">
+          <div class="aw-title" id="aw-title"></div>
+          <div class="aw-actions" id="aw-actions"></div>
+        </header>
+        <div class="aw-body" id="aw-body"></div>
+      </section>
+    </div>
+
+    <div class="drop-overlay" id="drop" hidden>Solte para adicionar à estante</div>
+  </main>
+</div>
+<div id="toasts" aria-live="polite"></div>
+<input type="file" id="file-input" multiple hidden accept=".pdf,.epub,.kepub,.azw3,.mobi,.azw,.prc,.pdb,.cbz,.zip,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff">
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

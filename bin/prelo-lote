@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# prelo-lote: converte muitos livros de uma vez (arquivos e pastas inteiras).
+#
+# Lembra o que já converteu (pelo conteúdo do arquivo, não pelo nome): rodar de
+# novo na mesma pasta só converte os livros novos.
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=../lib/comum.sh
+source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/comum.sh"
+
+ajuda() {
+  cat <<'EOF'
+Uso: prelo-lote [opções] ARQUIVO|PASTA... [-- opções do prelo convert]
+
+Converte livros (PDF, EPUB, AZW3/MOBI, CBZ, imagens) em lote.
+
+  -f, --formato FMT     epub, azw3, mobi, cbz, pdf ou txt (padrão: azw3)
+  -p, --perfil ID       dispositivo, veja "prelo profiles" (padrão: automático)
+  -o, --saida PASTA     onde gravar (padrão: ao lado de cada original)
+  -r, --recursivo       inclui subpastas
+  -j, --paralelo N      conversões ao mesmo tempo (padrão: 1; cada uma já usa
+                        todos os núcleos para renderizar páginas)
+      --refazer         converte de novo o que já foi convertido
+      --mesmo-formato   inclui arquivos que já estão no formato pedido
+  -n, --simular         só mostra o que seria convertido
+  -h, --ajuda           mostra esta ajuda
+
+Exemplos:
+  prelo-lote -f azw3 -p kindle-pw5 ~/Livros
+  prelo-lote -r -f epub -o ~/Convertidos ~/Downloads -- --mode fixed --temperature 4800
+EOF
+}
+
+formato=azw3 perfil=auto saida='' recursivo=0 paralelo=1 refazer=0 mesmo=0 simular=0
+entradas=() extras=()
+while (($#)); do
+  case "$1" in
+    -f | --formato) formato="$(minusculas "${2:?falta o formato}")"; shift ;;
+    -p | --perfil) perfil="${2:?falta o perfil}"; shift ;;
+    -o | --saida) saida="${2:?falta a pasta}"; shift ;;
+    -r | --recursivo) recursivo=1 ;;
+    -j | --paralelo) paralelo="${2:?falta o número}"; shift ;;
+    --refazer) refazer=1 ;;
+    --mesmo-formato) mesmo=1 ;;
+    -n | --simular) simular=1 ;;
+    -h | --ajuda | --help) ajuda; exit 0 ;;
+    --) shift; extras=("$@"); break ;;
+    -*) morrer "opção desconhecida: $1 (veja --ajuda)" ;;
+    *) entradas+=("$1") ;;
+  esac
+  shift
+done
+
+((${#entradas[@]})) || { ajuda; exit 1; }
+formato_valido "$formato" || morrer "formato inválido: $formato (use: $PRELO_FORMATOS)"
+[[ "$paralelo" =~ ^[1-9][0-9]*$ ]] || morrer "--paralelo precisa ser um número maior que zero"
+[[ "$perfil" != auto ]] && extras=(--profile "$perfil" "${extras[@]}")
+[[ -n "$saida" ]] && saida="$(readlink -m "$saida")"
+
+# ---------------------------------------------------------------- arquivos
+arquivos=()
+pulados_formato=0
+adicionar() {
+  local f
+  f="$(readlink -f "$1")"
+  if [[ "$mesmo" == 0 && "$(extensao "$f")" == "$formato" ]]; then
+    pulados_formato=$((pulados_formato + 1))
+    return
+  fi
+  arquivos+=("$f")
+}
+for e in "${entradas[@]}"; do
+  if [[ -d "$e" ]]; then
+    profundidade=(-maxdepth 1)
+    ((recursivo)) && profundidade=()
+    while IFS= read -r -d '' f; do
+      e_livro "$f" && adicionar "$f"
+    done < <(find "$e" -mindepth 1 "${profundidade[@]}" \( -name '.*' -prune \) -o \
+               \( -path "${saida:-/nao-existe}" -prune \) -o -type f -print0 | sort -z)
+  elif e_livro "$e"; then
+    adicionar "$e"
+  else
+    aviso "ignorado (não é um livro aceito): $e"
+  fi
+done
+
+if ((${#arquivos[@]} == 0)); then
+  ((pulados_formato)) && morrer "nenhum livro para converter ($pulados_formato já em ${formato^^}; use --mesmo-formato)"
+  morrer "nenhum livro para converter"
+fi
+
+if ((simular)); then
+  titulo "Seriam convertidos para ${formato^^}:"
+  printf '  %s\n' "${arquivos[@]}"
+  exit 0
+fi
+
+# ---------------------------------------------------------------- conversão
+log="$(arquivo_de_log lote)"
+resultados="$(mktemp)"
+trap 'rm -f "$resultados"' EXIT
+titulo "Convertendo ${#arquivos[@]} livro(s) para ${formato^^}"
+
+converter_um() {
+  local origem="$1" pasta manifesto hash gerado
+  pasta="${saida:-$(dirname "$origem")}"
+  manifesto="$pasta/.prelo-lote.tsv"
+  hash="$(hash_arquivo "$origem")"
+  if ((!refazer)) && manifesto_tem "$manifesto" "$hash" "$formato" "$perfil"; then
+    printf 'pulado\t%s\n' "$origem" >> "$resultados"
+    info "já convertido: ${origem##*/}"
+    return
+  fi
+  if gerado="$(converter "$origem" "$formato" "$pasta" "$log" "${extras[@]}")" && [[ -f "$gerado" ]]; then
+    manifesto_anota "$manifesto" "$hash" "$formato" "$perfil" "$gerado"
+    printf 'ok\t%s\t%s\n' "$origem" "$gerado" >> "$resultados"
+    ok "${origem##*/} → ${gerado##*/}"
+  else
+    printf 'erro\t%s\n' "$origem" >> "$resultados"
+    erro "${origem##*/} (detalhes em $log)"
+  fi
+}
+
+for f in "${arquivos[@]}"; do
+  while (($(jobs -rp | wc -l) >= paralelo)); do wait -n || true; done
+  converter_um "$f" &
+done
+wait
+
+n_ok="$(grep -c '^ok' "$resultados" || true)"
+n_pulados="$(grep -c '^pulado' "$resultados" || true)"
+n_erros="$(grep -c '^erro' "$resultados" || true)"
+echo >&2
+titulo "Resumo: $n_ok convertido(s), $n_pulados já convertido(s), $n_erros com erro"
+((pulados_formato)) && info "$pulados_formato arquivo(s) já em ${formato^^} ficaram de fora (use --mesmo-formato)"
+((n_erros)) && info "log: $log"
+notificar "Prelo: lote concluído" "$n_ok convertido(s), $n_erros com erro"
+((n_erros == 0))

@@ -1,0 +1,10 @@
+# O repositório é usado no Linux e no Windows. Os scripts do Linux precisam de LF mesmo
+# num clone feito no Windows (core.autocrlf=true); os atalhos .cmd do Windows, de CRLF.
+*        text=auto
+*.sh     text eol=lf
+bin/*    text eol=lf
+*.cmd    text eol=crlf
+*.ico    binary
+*.png    binary
+*.jpg    binary
+*.woff2  binary
